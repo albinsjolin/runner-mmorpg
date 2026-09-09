@@ -1,0 +1,13 @@
+[package]
+name = "spacetimedb"
+version = "0.1.0"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+spacetimedb = { version = "=2.4.1", features = ["unstable"] }
+log = "0.4"

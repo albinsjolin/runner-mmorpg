@@ -1,0 +1,4 @@
+.godot/
+export/
+spacetimedb/spacetimedb/target/
+spacetime_bindings/codegen_debug/

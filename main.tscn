@@ -1,0 +1,10 @@
+[gd_scene load_steps=3 format=3 uid="uid://b4m0runnermain"]
+
+[ext_resource type="Script" path="res://main.gd" id="1_main"]
+[ext_resource type="Script" path="res://shared/net.gd" id="2_net"]
+
+[node name="Main" type="Node"]
+script = ExtResource("1_main")
+
+[node name="Net" type="Node" parent="."]
+script = ExtResource("2_net")

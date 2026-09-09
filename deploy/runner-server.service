@@ -1,0 +1,18 @@
+[Unit]
+Description=Runner MMORPG run server (Godot, ENet/UDP 7777)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=runner
+Group=runner
+WorkingDirectory=/opt/runner/app
+EnvironmentFile=/etc/runner.env
+Environment=HOME=/opt/runner
+ExecStart=/opt/godot/godot --headless --path /opt/runner/app -- $RUNNER_ARGS
+Restart=always
+RestartSec=3
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

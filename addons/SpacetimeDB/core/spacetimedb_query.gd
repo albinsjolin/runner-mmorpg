@@ -1,0 +1,213 @@
+## Fluent builder for SpacetimeDB SQL subscription queries.
+##
+## Constructs [code]SELECT * FROM table WHERE ...[/code] strings with safe
+## identifier validation and proper value escaping. Chain [code].where*()[/code]
+## calls then pass [method to_sql] to [method SpacetimeDBClient.subscribe].
+##
+## [b]Usage:[/b]
+## [codeblock]
+## var sql: String = SpacetimeDBQuery.table("pawn_info").where("owner", identity).to_sql()
+## client.subscribe([sql])
+## [/codeblock]
+class_name SpacetimeDBQuery
+extends RefCounted
+
+static var _identifier_regex: RegEx
+
+var _table_name: String
+var _conditions: PackedStringArray = []
+
+
+## Creates a query targeting [param name].
+static func table(name: String) -> SpacetimeDBQuery:
+	var validated: String = _validate_identifier(name)
+	if validated.is_empty():
+		push_error("SpacetimeDBQuery.table: invalid or empty table name '%s'." % name)
+		return null
+	var q: SpacetimeDBQuery = SpacetimeDBQuery.new()
+	q._table_name = validated
+	return q
+
+
+## Creates a query from an existing [_ModuleTable] (uses its internal table name).
+static func from(t: _ModuleTable) -> SpacetimeDBQuery:
+	if t == null:
+		push_error("SpacetimeDBQuery.from: null table.")
+		return null
+	var validated: String = _validate_identifier(t._table_name)
+	if validated.is_empty():
+		push_error("SpacetimeDBQuery.from: invalid table name '%s'." % t._table_name)
+		return null
+	var q: SpacetimeDBQuery = SpacetimeDBQuery.new()
+	q._table_name = validated
+	return q
+
+
+# Validates the field, then appends `field <op> value`. Skips the append entirely on
+# an invalid identifier (which already push_error'd) so to_sql() can't emit a
+# malformed ` <op> value` fragment with a blank column.
+func _append_comparison(field: String, op: String, value: Variant) -> void:
+	var ident: String = _validate_identifier(field)
+	if ident.is_empty():
+		return
+	_conditions.append("%s %s %s" % [ident, op, _format_value(value)])
+
+
+## Adds [code]field = value[/code]. Multiple conditions are AND'd.
+func where(field: String, value: Variant) -> SpacetimeDBQuery:
+	_append_comparison(field, "=", value)
+	return self
+
+
+## Adds [code]field != value[/code].
+func where_ne(field: String, value: Variant) -> SpacetimeDBQuery:
+	_append_comparison(field, "!=", value)
+	return self
+
+
+## Adds [code]field > value[/code].
+func where_gt(field: String, value: Variant) -> SpacetimeDBQuery:
+	_append_comparison(field, ">", value)
+	return self
+
+
+## Adds [code]field < value[/code].
+func where_lt(field: String, value: Variant) -> SpacetimeDBQuery:
+	_append_comparison(field, "<", value)
+	return self
+
+
+## Adds [code]field >= value[/code].
+func where_gte(field: String, value: Variant) -> SpacetimeDBQuery:
+	_append_comparison(field, ">=", value)
+	return self
+
+
+## Adds [code]field <= value[/code].
+func where_lte(field: String, value: Variant) -> SpacetimeDBQuery:
+	_append_comparison(field, "<=", value)
+	return self
+
+
+## Matches [param field] against any of [param values], emitted as the OR group
+## [code](field = v1 OR field = v2 ...)[/code]. Empty [param values] is a no-op.
+##
+## Not [code]IN (...)[/code]: SpacetimeDB's SQL has no such operator. Its expression
+## parser accepts comparisons ([code]=[/code], [code]!=[/code], [code]<[/code],
+## [code]<=[/code], [code]>[/code], [code]>=[/code]) joined by [code]AND[/code] /
+## [code]OR[/code] and rejects everything else, so an emitted [code]IN[/code] fails the
+## whole query set as an unsupported expression. The OR group means the same thing and
+## parses; its practical ceiling is the server's expression-recursion guard (1600).
+func where_in(field: String, values: Array) -> SpacetimeDBQuery:
+	if values.is_empty():
+		push_error("SpacetimeDBQuery.where_in: empty value list for field '%s'." % field)
+		return self
+	var ident: String = _validate_identifier(field)
+	if ident.is_empty():
+		return self
+	var ors: PackedStringArray = []
+	for v: Variant in values:
+		ors.append("%s = %s" % [ident, _format_value(v)])
+	_append_or_group(ors)
+	return self
+
+
+## Adds an OR group of equality checks: [code](f1 = v1 OR f2 = v2 ...)[/code],
+## ANDed with the other conditions. [param pairs] is an [Array] of
+## [code][field, value][/code] two-element arrays. Empty [param pairs] is a no-op.
+func where_any(pairs: Array) -> SpacetimeDBQuery:
+	var ors: PackedStringArray = []
+	for p: Array in pairs:
+		if p.size() != 2:
+			push_error("SpacetimeDBQuery.where_any: each pair must be [field, value].")
+			continue
+		var ident: String = _validate_identifier(p[0])
+		if ident.is_empty():
+			continue
+		ors.append("%s = %s" % [ident, _format_value(p[1])])
+	_append_or_group(ors)
+	return self
+
+
+# Appends [param disjuncts] as one parenthesised OR condition, or nothing when there are
+# none to append. Every OR group the builder emits goes through here, so the parentheses
+# that keep the group intact once to_sql() AND-joins it with the other conditions are
+# decided in one place rather than at each call site.
+func _append_or_group(disjuncts: PackedStringArray) -> void:
+	if disjuncts.is_empty():
+		return
+	_conditions.append("(%s)" % " OR ".join(disjuncts))
+
+
+## Builds and returns the complete SQL string.
+func to_sql() -> String:
+	var sql: String = "SELECT * FROM %s" % _table_name
+	if not _conditions.is_empty():
+		sql += " WHERE " + " AND ".join(_conditions)
+	return sql
+
+
+func _to_string() -> String:
+	return to_sql()
+
+# --- Value formatting with proper escaping ---
+
+
+static func _format_value(value: Variant) -> String:
+	var vt: int = typeof(value)
+	if vt == TYPE_NIL:
+		# `field = NULL` never matches in SQL; almost always a caller mistake. Fail
+		# loud rather than silently emit `str(null)` = "<null>" (which was unquoted
+		# and injectable) or a no-match condition.
+		push_error("SpacetimeDBQuery: null value has no SQL equality form (use a different query).")
+		return "NULL"
+	if vt == TYPE_STRING or vt == TYPE_STRING_NAME:
+		# StringName must be quoted+escaped like String — typeof(&\"x\") is
+		# TYPE_STRING_NAME (21), distinct from TYPE_STRING (4). Falling through to the
+		# raw str() default was a SQL-injection hole (e.g. .where("state", &"alive")).
+		# SpacetimeDB parses with PostgreSqlDialect (standard_conforming_strings):
+		# backslash is literal in '...' literals, so doubling ' is the only escape.
+		return "'%s'" % String(value).replace("'", "''")
+	if vt == TYPE_BOOL:
+		return "true" if value else "false"
+	if vt == TYPE_PACKED_BYTE_ARRAY:
+		# SpacetimeDB hex literal: bare 0x... (not a quoted string).
+		return "0x%s" % (value as PackedByteArray).hex_encode()
+	if vt == TYPE_FLOAT:
+		var f: float = value
+		if is_nan(f):
+			push_error("SpacetimeDBQuery: NaN cannot be represented in SQL.")
+			return "NULL"
+		if is_inf(f):
+			push_error("SpacetimeDBQuery: Infinity cannot be represented in SQL.")
+			return "NULL"
+		# Lossless round-trip for double; locale-independent.
+		return "%.17g" % f
+	if vt == TYPE_INT:
+		# Integer literal — digits/sign only, no quoting or escaping needed.
+		return str(value)
+	# Any other type (Vector*, Array, Dictionary, Object, ...) has no SQL literal
+	# form here; str() would emit unquoted malformed SQL. Fail loud instead.
+	push_error("SpacetimeDBQuery: unsupported value type %d for SQL formatting." % vt)
+	return "NULL"
+
+# --- Identifier validation ---
+
+
+static func _validate_identifier(name: Variant) -> String:
+	var s: String = str(name)
+	if _identifier_regex == null:
+		_identifier_regex = RegEx.new()
+		_identifier_regex.compile("^[a-zA-Z_][a-zA-Z0-9_]*$")
+	if not _identifier_regex.search(s):
+		push_error(
+			"SpacetimeDBQuery: Invalid SQL identifier '%s'. Only alphanumeric characters and underscores are allowed."
+			% s
+		)
+		return ""
+	return s
+
+
+## Formats a 32-byte identity as a SpacetimeDB hex literal (e.g. [code]0x...[/code]).
+static func identity(bytes: PackedByteArray) -> String:
+	return "0x%s" % bytes.hex_encode()
