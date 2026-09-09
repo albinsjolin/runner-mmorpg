@@ -181,46 +181,101 @@ speed windows at 3x, monster levels by depth, camps, loot banking, death, and ex
 - Snapshots are compact arrays (see `PartySim.to_snapshot`), a few hundred bytes for a
   party. Stay under ENet's ~1400 byte MTU or unreliable packets fragment and drop.
 
-## Deploy the run server to a VPS
+## Host the ENet run server on DigitalOcean
 
-The latency test: the UDP run server on a droplet, clients on your PCs joining it directly.
-`deploy/` has everything. Pick a region close to the players (Frankfurt or Amsterdam from
-Sweden); a small 1 vCPU / 1 GB Ubuntu box is plenty for a handful of parties.
+This is the setup that was tested: a 1 GB Ubuntu droplet in Amsterdam running the Godot
+run server headless, clients on PCs joining it directly over UDP. Everything needed is in
+`deploy/`. Use the 1 GB size or bigger: Godot's import step runs the engine in editor mode
+and gets OOM-killed on the 512 MB droplet. The running server itself idles at about 125 MB.
 
-1. Create the droplet with your SSH key, then on it:
+### 1. Create the droplet
 
-```
+Ubuntu 24.04, 1 GB, a region near the players (Amsterdam or Frankfurt from Sweden), your
+SSH key added. Note the public IP; the commands below use `IP` for it.
+
+### 2. One-time setup on the box
+
+From your PC:
+
+```powershell
 scp deploy/setup_vps.sh deploy/runner-server.service root@IP:/root/
 ssh root@IP bash /root/setup_vps.sh
 ```
 
-   This installs Godot 4.7.2 (the Linux editor binary runs headless; no export templates
-   needed), a `runner` user, a systemd service, and opens UDP 7777. The flags the service
-   runs with live in `/etc/runner.env`; it starts in offline mode with the droplet's
-   public IP as its address.
+The script waits for the first-boot apt run to release its lock (it prints
+"waiting for the first-boot apt run to finish..." meanwhile), installs the libraries Godot
+wants, downloads Godot 4.7.2 for Linux to `/opt/godot/godot` (the editor binary runs
+headless, so no export templates), adds a 1 GB swap file, creates the `runner` user and
+`/opt/runner/app`, opens SSH and UDP 7777 in ufw, and installs the `runner-server` systemd
+service. The server flags live in `/etc/runner.env`, preset to offline mode with the
+droplet's public IP as its address. It is safe to rerun.
 
-2. From your PC, every time you change code:
+If the droplet has a DigitalOcean Cloud Firewall attached, add an inbound rule for UDP
+7777 there too; it drops packets silently otherwise.
+
+### 3. Deploy the project
+
+From your PC, and again after every code change:
 
 ```powershell
 .\deploy\deploy.ps1 -VpsHost root@IP
 ```
 
-   Packs the project, uploads it, runs Godot's import once, restarts the service.
+It packs the project without caches (about 1 MB), uploads it with scp, unpacks it to
+`/opt/runner/app`, runs Godot's import on the box to build the `.godot` cache and class
+registry, and restarts the service. It ends with "import ok: N classes registered" and the
+service status. If the import fails it prints the import log and stops.
 
-3. Join directly, no town, from each PC:
+### 4. Check it is running
+
+On the box:
+
+```
+systemctl status runner-server --no-pager
+journalctl -u runner-server -n 20 --no-pager      # expect: [server] listening on UDP 7777
+ss -lunp | grep 7777                              # expect a godot process on the port
+```
+
+### 5. Join and measure latency
+
+From each PC:
 
 ```
 godot --path . -- --host=IP --zone=forest
 ```
 
-   The HUD's top-right line shows the ENet round trip, packet loss, and how stale the
-   newest snapshot is. Green under 80 ms, yellow under 150. Watch it while switching lanes
-   and jumping: the delay you feel between a key press and the character moving is one
-   round trip, since there is no client prediction yet.
+The top-right HUD line shows the ENet round trip, packet loss, and how stale the newest
+snapshot is. Green under 80 ms, yellow under 150. Amsterdam from Sweden measures around
+20 to 40 ms. With no client prediction yet, the delay between a key press and the
+character moving is one round trip.
 
-4. Meta mode on the VPS too (town, parties, loot): run setup with `WITH_SPACETIMEDB=1`,
-   publish the module to it from your PC, switch `/etc/runner.env` to the meta line and
-   restart. Clients then start with `--stdb=http://IP:3000`.
+### If it does not start
+
+The server log showing `Could not find type "RunnerModuleClient"` or `Identifier
+"Constants" not declared` means the `.godot` cache is missing: the import did not run.
+Run it by hand and restart:
+
+```
+sudo -u runner HOME=/opt/runner /opt/godot/godot --headless --path /opt/runner/app --import
+systemctl restart runner-server && sleep 2 && ss -lunp | grep 7777
+```
+
+The import prints progress lines ending in `[ DONE ] reimport`. A final
+`ERROR: Couldn't return to previous working directory` is harmless: the runner user cannot
+read /root. "Killed" means the box ran out of memory; check `free -m` and `swapon --show`.
+
+Other useful commands on the box:
+
+```
+journalctl -u runner-server -f                    # follow the server log
+nano /etc/runner.env && systemctl restart runner-server   # change flags (speed, meta mode)
+```
+
+### Meta mode on the VPS (town, parties, loot)
+
+Rerun setup with `WITH_SPACETIMEDB=1` to install SpacetimeDB on the box, publish the
+module to it from your PC, switch `/etc/runner.env` to the meta line, and point clients at
+it with `--stdb`:
 
 ```
 ssh root@IP WITH_SPACETIMEDB=1 bash /root/setup_vps.sh
@@ -229,9 +284,6 @@ cd spacetimedb; spacetime publish runner --server vps --yes; cd ..
 ssh root@IP "sed -i 's/^RUNNER_ARGS=--server --address/# &/; s/^# RUNNER_ARGS=--server --stdb/RUNNER_ARGS=--server --stdb/' /etc/runner.env && systemctl restart runner-server"
 godot --path . -- --stdb=http://IP:3000 --profile=me
 ```
-
-Useful on the box: `journalctl -u runner-server -f` for the server log,
-`systemctl restart runner-server` after editing the env file.
 
 ## Next steps worth doing
 

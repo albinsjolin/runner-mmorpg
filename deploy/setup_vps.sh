@@ -15,6 +15,11 @@ GODOT_URL="https://github.com/godotengine/godot/releases/download/${GODOT_VERSIO
 PUBLIC_IP="$(curl -s -4 https://ifconfig.me || hostname -I | awk '{print $1}')"
 
 echo "== packages"
+# A fresh droplet runs unattended upgrades on first boot and holds the apt lock for a while.
+while fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1; do
+  echo "   waiting for the first-boot apt run to finish..."
+  sleep 5
+done
 apt-get update -q
 apt-get install -y -q unzip curl ufw libgl1 libxcursor1 libxinerama1 libxrandr2 libxi6 libx11-6 libasound2t64 2>/dev/null \
   || apt-get install -y -q unzip curl ufw libgl1 libxcursor1 libxinerama1 libxrandr2 libxi6 libx11-6 libasound2
@@ -29,6 +34,13 @@ if [ ! -x /opt/godot/godot ]; then
   rm /tmp/godot.zip
 fi
 /opt/godot/godot --version
+
+echo "== swap (safety net on small droplets)"
+if [ ! -f /swapfile ]; then
+  fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+free -m | sed 's/^/   /'
 
 echo "== user and folders"
 id -u runner >/dev/null 2>&1 || useradd --system --create-home --home-dir /opt/runner --shell /usr/sbin/nologin runner
